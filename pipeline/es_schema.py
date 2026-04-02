@@ -3,7 +3,7 @@ from logger import get_logger
 
 log = get_logger("es_schema")
 
-INDEX_NAME = "pharma_knowledge_v1"
+INDEX_NAME = "pharma_knowledge_v2"
 
 INDEX_MAPPING = {
     "settings": {

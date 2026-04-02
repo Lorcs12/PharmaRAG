@@ -4,10 +4,11 @@ import numpy as np
 from config import CFG
 from .models import RawChunk, DrugLabel
 from .helpers import strip_html
-from .clinical_parsers import (
+from .clinical_parsers_regex import (
     parse_dose_value, parse_clinical_route, 
     parse_patient_population, execute_semantic_chunking
 )
+from .clinical_parser_medspacy import clinical_analyzer
 from .ingestion_constants import FDA_FIELD_MAP
 
 def generate_artifact_urn(rxcui: str, set_id: str, layout_type: str, regulatory_source: str, seq: int) -> str:
@@ -38,12 +39,9 @@ def extract_structured_dosing_artifacts(label_data: dict, drug: DrugLabel, logge
             sent = sent.strip()
             if len(sent) < 30 or not any(c.isdigit() for c in sent):
                 continue
-
-            dose_val, dose_unit = parse_dose_value(sent)
-            route               = parse_clinical_route(sent)
-            population          = parse_patient_population(sent)
-
-            urn = generate_dosing_urn(drug.rxcui, drug.set_id, route, population, seq)
+            
+            sent_data = clinical_analyzer.extract_clinical_entities(sent)
+            urn = generate_dosing_urn(drug.rxcui, drug.set_id, sent_data["route"], sent_data["population"], seq)
 
             raglens_risk = CFG.ingestion.raglens_by_layout["dosing"]
             if drug.boxed_warning:
@@ -64,10 +62,10 @@ def extract_structured_dosing_artifacts(label_data: dict, drug: DrugLabel, logge
                 atc_code=drug.atc_code,
                 smpc_section_code="34068-7",
                 boxed_warning=drug.boxed_warning,
-                dose_val=dose_val,
-                dose_unit=dose_unit,
-                dose_route=route,
-                patient_population=population,
+                dose_val=sent_data["dose_val"],
+                dose_unit=sent_data["dose_unit"],
+                dose_route=sent_data["route"],
+                patient_population=sent_data["population"],
             ))
             seq += 1
 
