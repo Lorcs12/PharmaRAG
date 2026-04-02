@@ -8,7 +8,7 @@ class CogCanvasArtifact(BaseCogCanvasArtifact):
         conflicts = []
         dose_nodes = [
             n for n in (self.verbatim_nodes + self.paraphrase_nodes)
-            if n.layout_type == "dosing" and n.dose_val is not None
+            if n.layout_type == "dosing" and n.dose_values
         ]
         groups: dict[tuple, list[RetrievedNode]] = defaultdict(list)
         for n in dose_nodes:
@@ -19,7 +19,7 @@ class CogCanvasArtifact(BaseCogCanvasArtifact):
         for key, nodes in groups.items():
             if len(nodes) < 2:
                 continue
-            vals = [n.dose_val for n in nodes if n.dose_val is not None]
+            vals = sorted({val for n in nodes for val in n.dose_values})
             if not vals:
                 continue
             min_val, max_val = min(vals), max(vals)

@@ -2,6 +2,7 @@ import spacy
 import medspacy
 from medspacy.ner import TargetRule
 from typing import Optional, List, Dict, Tuple
+import re
 from config import CFG
 
 class ClinicalTextAnalyzer:
@@ -53,14 +54,13 @@ class ClinicalTextAnalyzer:
         self.target_matcher.add(rules)
 
     def extract_clinical_entities(self, text: str) -> Dict:
-        """Processes text in a single pass to extract clean, contextualized entities."""
         doc = self.nlp(text)
         
         results = {
             "route": None,
             "population": None,
-            "dose_val": None,
-            "dose_unit": None,
+            "dose_values": [],
+            "dose_units": set(),
             "sentences": [sent.text.strip() for sent in doc.sents if len(sent.text.strip()) > 5]
         }
 
@@ -76,46 +76,76 @@ class ClinicalTextAnalyzer:
             elif label.startswith("POP_"):
                 results["population"] = label.replace("POP_", "").lower()
             
-            elif label == "DOSAGE" and results["dose_val"] is None:
+            elif label == "DOSAGE":
                 try:
-                    results["dose_val"] = float(ent[0].text)
-                    results["dose_unit"] = ent[1].text.lower()
+                    val = float(ent[0].text)
+                    unit = ent[1].text.lower()
+                    if val not in results["dose_values"]:
+                        results["dose_values"].append(val)
+                    results["dose_units"].add(unit)
                 except (ValueError, IndexError):
                     pass
 
         results["route"] = results["route"] or "unspecified"
         results["population"] = results["population"] or "general"
+        results["dose_units"] = sorted(results["dose_units"])
         
         return results
 
-    def execute_semantic_chunking(self, text: str, max_chars: int = None, overlap: int = None) -> List[str]:
+    def execute_semantic_chunking(self, text: str, max_chars: int = None, overlap_sentences: int = 1) -> List[str]:
         max_chars = max_chars or CFG.ingestion.max_chunk_chars
-        overlap = overlap or CFG.ingestion.chunk_overlap
 
         if len(text) <= max_chars:
             return [text]
 
-        doc = self.nlp(text)
-        sentences = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
-        
-        chunks, buf = [], ""
-        for sent in sentences:
-            if len(buf) + len(sent) + 1 <= max_chars:
-                buf = (buf + " " + sent).strip()
-            else:
-                if buf:
-                    chunks.append(buf)
-                buf = sent
-        if buf:
-            chunks.append(buf)
+        protected_text = re.sub(r'(\|[^\n]+\|\n)', r'\1<TBL_BREAK>', text)
 
-        overlapped_chunks = []
-        for i, chunk in enumerate(chunks):
-            if i > 0:
-                prev_tail = chunks[i-1][-overlap:]
-                chunk = prev_tail + " " + chunk
-            overlapped_chunks.append(chunk.strip())
-            
-        return overlapped_chunks
+        doc = self.nlp(protected_text)
+        sentences = [sent.text.replace('<TBL_BREAK>', '').strip() for sent in doc.sents if sent.text.strip()]
+        sentences = self._merge_continuation_blocks(sentences)
+
+        chunks = []
+        current_chunk_sents: List[str] = []
+        current_len = 0
+
+        for sent in sentences:
+            sent_len = len(sent)
+            if current_len + sent_len > max_chars and current_chunk_sents:
+                chunks.append(" ".join(current_chunk_sents))
+                overlap_start = max(0, len(current_chunk_sents) - overlap_sentences)
+                current_chunk_sents = current_chunk_sents[overlap_start:]
+                current_len = sum(len(s) + 1 for s in current_chunk_sents)
+            current_chunk_sents.append(sent)
+            current_len += sent_len + 1
+
+        if current_chunk_sents:
+            chunks.append(" ".join(current_chunk_sents))
+
+        return chunks
+
+    @staticmethod
+    def _merge_continuation_blocks(sentences: List[str]) -> List[str]:
+        if not sentences:
+            return []
+
+        merged: List[str] = []
+        for sentence in sentences:
+            if merged and ClinicalTextAnalyzer._should_attach_to_previous(merged[-1], sentence):
+                merged[-1] = f"{merged[-1]} \n{sentence}".strip()
+            else:
+                merged.append(sentence)
+        return merged
+
+    @staticmethod
+    def _should_attach_to_previous(previous: str, current: str) -> bool:
+        previous = previous.strip()
+        current = current.strip()
+        if not previous or not current:
+            return False
+
+        if previous.endswith(":"):
+            return True
+
+        return False
 
 clinical_analyzer = ClinicalTextAnalyzer()

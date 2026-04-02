@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 @dataclass
@@ -17,8 +17,9 @@ class RawChunk:
     atc_code:          str
     smpc_section_code: str
     boxed_warning:     bool
+    parent_urn:        Optional[str] = None
     regulatory_source: str = "fda_us"
-    dose_val:          Optional[float] = None
-    dose_unit:         Optional[str]   = None
+    dose_values:       list[float]     = field(default_factory=list)
+    dose_units:        list[str]       = field(default_factory=list)
     dose_route:        Optional[str]   = None
     patient_population: Optional[str]  = None

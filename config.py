@@ -6,7 +6,7 @@ import os
 @dataclass
 class ElasticsearchConfig:
     host:  str = "http://localhost:9200"
-    index: str = "pharma_knowledge_v1"
+    index: str = "pharma_knowledge_v3"
 
     bulk_chunk_size: int = 400
 

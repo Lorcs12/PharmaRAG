@@ -27,29 +27,38 @@ def parse_patient_population(text: str) -> str:
             return pop
     return "general"
 
-def execute_semantic_chunking(text: str, max_chars: int = None, overlap: int = None) -> list[str]:
+def execute_semantic_chunking(text: str, max_chars: int = None, overlap_sentences: int = 1) -> list[str]:
     max_chars = max_chars or CFG.ingestion.max_chunk_chars
-    overlap   = overlap   or CFG.ingestion.chunk_overlap
 
     if len(text) <= max_chars:
         return [text]
 
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    chunks, buf = [], ""
-    for sent in sentences:
-        if len(buf) + len(sent) + 1 <= max_chars:
-            buf = (buf + " " + sent).strip()
+    protected_text = re.sub(r'(\|[^\n]+\|\n)', r'\1<TBL_BREAK>', text)
+    raw_sentences = re.split(r'(?<=[.!?])\s+', protected_text)
+    sentences = [s.replace('<TBL_BREAK>', '').strip() for s in raw_sentences if s.strip()]
+    merged_sentences: list[str] = []
+    for sentence in sentences:
+        if merged_sentences and merged_sentences[-1].strip().endswith(":"):
+            merged_sentences[-1] = f"{merged_sentences[-1]} {sentence}".strip()
         else:
-            if buf:
-                chunks.append(buf)
-            buf = sent
-    if buf:
-        chunks.append(buf)
+            merged_sentences.append(sentence)
+    sentences = merged_sentences
 
-    overlapped_chunks = []
-    for i, chunk in enumerate(chunks):
-        if i > 0:
-            prev_tail = chunks[i-1][-overlap:]
-            chunk = prev_tail + " " + chunk
-        overlapped_chunks.append(chunk.strip())
-    return overlapped_chunks
+    chunks: list[str] = []
+    current_chunk_sents: list[str] = []
+    current_len = 0
+
+    for sent in sentences:
+        sent_len = len(sent)
+        if current_len + sent_len > max_chars and current_chunk_sents:
+            chunks.append(" ".join(current_chunk_sents))
+            overlap_start = max(0, len(current_chunk_sents) - overlap_sentences)
+            current_chunk_sents = current_chunk_sents[overlap_start:]
+            current_len = sum(len(s) + 1 for s in current_chunk_sents)
+        current_chunk_sents.append(sent)
+        current_len += sent_len + 1
+
+    if current_chunk_sents:
+        chunks.append(" ".join(current_chunk_sents))
+
+    return chunks

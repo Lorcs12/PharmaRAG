@@ -12,8 +12,7 @@ from .clients.rx_norm_cl import RxNormClient
 from .models import RawChunk, DrugLabel, IndexDoc
 
 from .artifact_extractors import (
-    extract_structured_dosing_artifacts, 
-    extract_semantic_prose_artifacts
+    extract_hierarchical_dosing_artifacts
 )
 
 log = get_logger("pipeline", CFG.log.file, CFG.log.level)
@@ -47,7 +46,6 @@ class PharmaIngestionPipeline:
         result = label_resp["results"][0]
         openfda = result.get("openfda", {})
         
-        # ... (Date parsing logic remains the same) ...
         eff_time = result.get("effective_time", "")
         label_date = f"{eff_time[:4]}-{eff_time[4:6]}-{eff_time[6:8]}" if len(eff_time) == 8 else None
 
@@ -93,10 +91,13 @@ class PharmaIngestionPipeline:
                 "colbert_tokens":     colbert_toks,
                 "muvera_fde":         muvera_fde,
             }
-            # Attach optional parsed fields
-            for field in ["label_version_date", "dose_val", "dose_unit", "dose_route", "patient_population"]:
-                if getattr(artifact, field, None) is not None:
-                    source[field] = getattr(artifact, field)
+            for field in ["label_version_date", "dose_values", "dose_units", "dose_route", "patient_population", "parent_urn"]:
+                value = getattr(artifact, field, None)
+                if value is None:
+                    continue
+                if isinstance(value, list) and not value:
+                    continue
+                source[field] = value
 
             docs.append(IndexDoc(source=source))
         return docs
@@ -111,16 +112,13 @@ class PharmaIngestionPipeline:
         if self.ckpt.is_set_id_done(drug.set_id):
             return 0, drug
 
-        dosing_artifacts = extract_structured_dosing_artifacts(label_data, drug, log)
-        prose_artifacts  = extract_semantic_prose_artifacts(label_data, drug, log)
+        all_artifacts = extract_hierarchical_dosing_artifacts(label_data, drug, log)
         
-        all_artifacts = dosing_artifacts + prose_artifacts
         if not all_artifacts:
             return 0, drug
 
         docs = self._generate_tripartite_embeddings(all_artifacts)
         
-        # Bulk index logic
         actions = [{"_index": INDEX_NAME, "_id": d.source["urn_id"], "_source": d.source} for d in docs]
         success, _ = helpers.bulk(self.es, actions, raise_on_error=False)
         

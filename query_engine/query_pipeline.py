@@ -255,7 +255,7 @@ class PharmaQueryEngine:
             node.confidence_verified = True
             return node
 
-        if node.dose_val is None:
+        if not node.dose_values:
             return node
 
         try:
@@ -267,18 +267,19 @@ class PharmaQueryEngine:
                         {"term": {"layout_type": "dosing"}},
                         {"range": {"chunk_confidence": {"gte": 0.90}}},
                     ]}},
-                    "_source": ["dose_val", "dose_unit", "urn_id"],
+                    "_source": ["dose_values", "dose_units", "dose_val", "dose_unit", "urn_id"],
                     "size": 1,
                 }
             )
             if resp["hits"]["hits"]:
                 fact = resp["hits"]["hits"][0]["_source"]
-                node.verified_dose_val   = fact.get("dose_val")
+                node.verified_dose_values = fact.get("dose_values") or ([] if fact.get("dose_val") is None else [fact["dose_val"]])
+                verified_units = fact.get("dose_units") or ([] if fact.get("dose_unit") is None else [fact["dose_unit"]])
                 node.confidence_verified = True
                 log.info(
                     f"Calibrated: {node.urn[-35:]} → "
-                    f"verified_dose={node.verified_dose_val} {fact.get('dose_unit','')}",
-                    extra={"urn": node.urn, "verified": node.verified_dose_val}
+                    f"verified_doses={node.verified_dose_values} {'/'.join(verified_units)}",
+                    extra={"urn": node.urn, "verified": node.verified_dose_values}
                 )
         except Exception as e:
             log.warning(f"Confidence calibration failed: {e}")

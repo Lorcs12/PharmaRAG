@@ -5,4 +5,5 @@ def strip_html(html: str) -> str:
     s = _HTMLStripper()
     s.feed(html)
     text = s.get_data()
-    return re.sub(r'\s+', ' ', text).strip()
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
+    return "\n".join(line for line in lines if line)
