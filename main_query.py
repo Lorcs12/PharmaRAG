@@ -1,14 +1,8 @@
 import sys
-from query_engine import ReflectivePharmaQueryEngine
+from query_engine import ReflectivePharmaQueryEngine, generate_google_ai_studio_answer
 
 TEST_QUERIES = [
-    "What is the dose of metformin for a patient with renal impairment?",
-    "Can warfarin be combined with aspirin? What is the interaction?",
-    "What are the contraindications for atorvastatin?",
-    "What is the standard adult dose of lisinopril for hypertension?",
-    "What are the side effects of sertraline?",
-    "How does metformin work as a mechanism?",
-    "What are typical statin doses across the class?",
+    "What is the standard dose of apixaban for DVT treatment in adults",
 ]
 
 if __name__ == "__main__":
@@ -46,4 +40,14 @@ if __name__ == "__main__":
     print(f"\n{'═'*72}")
     print("  CONSTRAINED LLM PROMPT")
     print(f"{'═'*72}")
-    print(artifact.generate_constrained_prompt())
+    prompt = artifact.generate_constrained_prompt()
+    print(prompt)
+
+    print(f"\n{'═'*72}")
+    print("LLM ANSWER")
+    print(f"{'═'*72}")
+    try:
+        answer = generate_google_ai_studio_answer(prompt)
+        print(answer)
+    except Exception as exc:
+        print(f"  ERROR: {exc}")

@@ -123,6 +123,13 @@ class APIConfig:
 
 
 @dataclass
+class LLMConfig:
+    provider: str = "google_ai_studio"
+    model: str = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
+    api_key_env: str = "google_api_key"
+
+
+@dataclass
 class CheckpointConfig:
     dir:        str = "./checkpoints"
     save_every: int = 50  
@@ -140,6 +147,7 @@ class PharmaConfig:
     embedding:   EmbeddingConfig     = field(default_factory=EmbeddingConfig)
     ingestion:   IngestionConfig     = field(default_factory=IngestionConfig)
     api:         APIConfig           = field(default_factory=APIConfig)
+    llm:         LLMConfig           = field(default_factory=LLMConfig)
     checkpoint:  CheckpointConfig    = field(default_factory=CheckpointConfig)
     log:         LogConfig           = field(default_factory=LogConfig)
 

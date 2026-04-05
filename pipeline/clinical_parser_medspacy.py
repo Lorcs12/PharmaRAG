@@ -47,7 +47,8 @@ class ClinicalTextAnalyzer:
 
         dose_pattern = [
             {"LIKE_NUM": True},
-            {"LOWER": {"IN": ["mg/kg", "mg/m2", "mcg/kg", "mg", "mcg", "g", "units/kg", "unit/kg", "meq", "ml"]}}
+            {"LOWER": {"IN": ["mg/kg", "mg/m2", "mcg/kg", "mg", "mcg", "g", "units/kg", "unit/kg", "meq", "ml", "mg/day", "mcg/ml", "mg/ml", "mcg/day",
+        "mg/m²", "units", "iu"]}}
         ]
         rules.append(TargetRule("DOSAGE", "DOSAGE", pattern=dose_pattern))
 
@@ -80,6 +81,8 @@ class ClinicalTextAnalyzer:
                 try:
                     val = float(ent[0].text)
                     unit = ent[1].text.lower()
+                    if unit in ("mg/dl", "mg/l", "mmol/l", "meq/l", "g/dl"):
+                        continue
                     if val not in results["dose_values"]:
                         results["dose_values"].append(val)
                     results["dose_units"].add(unit)

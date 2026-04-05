@@ -33,4 +33,20 @@ FDA_FIELD_MAP = {
     "clinical_pharmacology":            ("34090-1", "pharmacology"),
     "description":                      ("34089-3", "pharmacology"),
     "patient_counseling_information":   ("42229-5", "patient_info"),
+    "dosage_and_administration":        ("34068-7", "dosing"),
+    "dosage_forms_and_strengths":       ("34069-5", "dosing"),
+    "overdosage":                       ("34088-4", "warning"),
+    "mechanism_of_action":              ("34067-9", "pharmacology"),
+    "pharmacodynamics":                 ("43682-4", "pharmacology"),
+    "pharmacokinetics":                 ("43682-4", "pharmacology"),
+    "pregnancy":                        ("34077-8", "indication"),
+    "pediatric_use":                    ("34080-2", "dosing"),
+    "geriatric_use":                    ("34081-0", "indication"),
 }
+
+DOSE_CONTEXT_RE = re.compile(
+    r'\b(dose|dosing|administer|take|give|start|initiat|titrat|receiv|treat|'
+    r'mg\s+(?:once|twice|oral|daily|bid|tid|qd|per\s+day)|'
+    r'recommended|prescri)\b',
+    re.IGNORECASE
+)
