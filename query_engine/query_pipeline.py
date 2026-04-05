@@ -88,7 +88,27 @@ def _get_drug_extractor() -> DrugNameExtractor:
     global _drug_extractor
     if _drug_extractor is None:
         names = set(getattr(CFG, "rxnorm_drug_names", set()))
-        names |= set(getattr(CFG, "top_50_drugs", []))
+        names |= {d.strip().lower() for d in getattr(CFG, "top_50_drugs", []) if d and d.strip()}
+        
+        try:
+            res = ES.search(index=IDX, body={
+                "size": 0,
+                "aggs": {
+                    "generics": {"terms": {"field": "drug_name_generic.keyword", "size": 1000}},
+                    "brands": {"terms": {"field": "drug_name_brand.keyword", "size": 1000}}
+                }
+            })
+            for bucket in res['aggregations']['generics']['buckets']:
+                key = str(bucket.get('key', '')).strip().lower()
+                if key:
+                    names.add(key)
+            for bucket in res['aggregations']['brands']['buckets']:
+                key = str(bucket.get('key', '')).strip().lower()
+                if key:
+                    names.add(key)
+        except Exception as e:
+            log.error(f"Failed to sync drug dictionary with index aggregations: {e}")
+
         _drug_extractor = DrugNameExtractor(names)
     return _drug_extractor
 

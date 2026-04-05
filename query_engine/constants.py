@@ -50,6 +50,9 @@ MEDICAL_CONCEPT_MAP: dict[str, tuple[str, Optional[str]]] = {
     "pediatric":         ("dosing",          "pediatric"),
     "children":          ("dosing",          "pediatric"),
     "elderly":           ("dosing",          "elderly"),
-    "pregnancy":         ("dosing",          "pregnancy"),
-    "pregnant":          ("dosing",          "pregnancy"),
+    "pregnancy":         ("contraindication", "pregnancy"),
+    "pregnant":          ("contraindication", "pregnancy"),
+    "lactation":         ("contraindication", "pregnancy"),
+    "breastfeed":        ("contraindication", "pregnancy"),
+    "nursing":           ("contraindication", "pregnancy"),
 }

@@ -29,6 +29,12 @@ MIN_MAXSIM_FLOOR: float = 0.38
 MIN_DOSE_EVIDENCE_NODES: int = 2
 LABEL_RECENCY_YEARS: int = 3
 POPULATION_RELAX_THRESHOLD: int = 1
+NUMERIC_TITRATION_POPULATIONS: set[str] = {
+    "renal_impairment",
+    "hepatic_impairment",
+    "pediatric",
+    "elderly",
+}
 
 _FALLBACK_LAYOUT_EXPANSION: dict[str, list[str]] = {
     "dosing": ["warning", "indication", "pharmacology"],
@@ -141,7 +147,12 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
         ):
             failures.append(GateFailure.NO_DOSING_NODES)
 
-        if intent.wants_dosing and dose_evidence_nodes < MIN_DOSE_EVIDENCE_NODES:
+        requires_numeric_titration = (
+            intent.wants_dosing
+            and intent.population_filter in NUMERIC_TITRATION_POPULATIONS
+        )
+
+        if requires_numeric_titration and dose_evidence_nodes < MIN_DOSE_EVIDENCE_NODES:
             failures.append(GateFailure.NO_DOSE_EVIDENCE)
 
         if intent.population_filter and len(hits) <= POPULATION_RELAX_THRESHOLD:
