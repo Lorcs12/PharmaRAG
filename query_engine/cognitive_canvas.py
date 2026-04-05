@@ -1,14 +1,19 @@
+import html
 import re
 from collections import defaultdict
 from .models import RetrievedNode, CogCanvasArtifact as BaseCogCanvasArtifact, CitationAuditResult
 from .utils import generate_ngrams, extract_surrounding_context
+
+
+def _x(text: object) -> str:
+    return html.escape(str(text), quote=True)
 
 class CogCanvasArtifact(BaseCogCanvasArtifact):
     def _detect_conflicts(self) -> list[dict]:
         conflicts = []
         dose_nodes = [
             n for n in (self.verbatim_nodes + self.paraphrase_nodes)
-            if n.layout_type == "dosing" and n.dose_val is not None
+            if n.layout_type == "dosing" and n.dose_values
         ]
         groups: dict[tuple, list[RetrievedNode]] = defaultdict(list)
         for n in dose_nodes:
@@ -19,7 +24,7 @@ class CogCanvasArtifact(BaseCogCanvasArtifact):
         for key, nodes in groups.items():
             if len(nodes) < 2:
                 continue
-            vals = [n.dose_val for n in nodes if n.dose_val is not None]
+            vals = sorted({val for n in nodes for val in n.dose_values})
             if not vals:
                 continue
             min_val, max_val = min(vals), max(vals)
@@ -90,20 +95,24 @@ class CogCanvasArtifact(BaseCogCanvasArtifact):
 
     def generate_constrained_prompt(self) -> str:
         self.conflicts = self._detect_conflicts()
-        
+        dose_evidence_nodes = getattr(self, "_dose_evidence_nodes", "?")
+        reflection_rounds = getattr(self, "_reflection_rounds", "?")
+
         prompt = [
             "<system_directives>",
             "You are a deterministic clinical reasoning engine. You operate under ZERO-HALLUCINATION rules.",
             "1. CITATION MANDATE: Every clinical claim must end with its source URN -> [SOURCE: urn:pharma:fda_us:rxcui:...]",
-            "2. VERBATIM ENFORCEMENT: Nodes marked <verbatim_locked> contain numerical/dosing data. You MUST quote the exact numerical constraint. DO NOT paraphrase doses or frequencies.",
-            "3. NO EXTERNAL KNOWLEDGE: If the provided evidence cannot answer the query, output: 'The provided label evidence does not contain sufficient information.'",
+            "2. VERBATIM ENFORCEMENT: Nodes marked <verbatim_locked> contain numerical or dosing data. You MUST quote exact constraints. DO NOT paraphrase doses or frequencies.",
+            "3. NO EXTERNAL KNOWLEDGE: If the provided evidence cannot answer the query, output exactly: '⚠ INSUFFICIENT EVIDENCE: The provided label data does not contain enough information to answer safely.'",
             "4. CONFLICT RESOLUTION: If a <dose_conflict_warning> is present, you MUST present both values and cite both sources.",
+            f"5. EVIDENCE AUDIT: {dose_evidence_nodes} node(s) in this context contain dose metadata. If this number is 0 for a dosing question, follow rule 3.",
+            f"6. RETRIEVAL METADATA: {reflection_rounds} reflection round(s) were used to build this context.",
             "</system_directives>\n",
             
             "<query_intent>",
-            f"<type>{self.intent.query_type.upper()}</type>",
-            f"<target_drugs>{', '.join(self.intent.drug_names) or 'not specified'}</target_drugs>",
-            f"<target_population>{self.intent.population_filter or 'general'}</target_population>",
+            f"<type>{_x(self.intent.query_type.upper())}</type>",
+            f"<target_drugs>{_x(', '.join(self.intent.drug_names) or 'not specified')}</target_drugs>",
+            f"<target_population>{_x(self.intent.population_filter or 'general')}</target_population>",
             "</query_intent>\n",
         ]
 
@@ -111,9 +120,9 @@ class CogCanvasArtifact(BaseCogCanvasArtifact):
             prompt.append("<dose_conflict_warnings>")
             for c in self.conflicts:
                 prompt.append(
-                    f"  <conflict drug='{c['drug']}' route='{c['route']}' population='{c['population']}'>"
-                    f"Values found: {c['values']} ({c['pct_diff']*100:.0f}% difference). "
-                    f"Sources: {', '.join(c['urns'])}."
+                    f"  <conflict drug='{_x(c['drug'])}' route='{_x(c['route'])}' population='{_x(c['population'])}'>"
+                    f"Values found: {_x(c['values'])} ({c['pct_diff']*100:.0f}% difference). "
+                    f"Sources: {', '.join(_x(urn) for urn in c['urns'])}."
                     f"</conflict>"
                 )
             prompt.append("</dose_conflict_warnings>\n")
@@ -124,22 +133,32 @@ class CogCanvasArtifact(BaseCogCanvasArtifact):
             prompt.append("  <verbatim_locked_nodes type='primary_dosing_and_warnings'>")
             for n in self.verbatim_nodes:
                 boxed = "true" if n.boxed_warning else "false"
+                has_dose_metadata = "true" if n.dose_values else "false"
                 prompt.append(
-                    f"    <artifact urn='{n.urn}' type='{n.layout_type}' boxed_warning='{boxed}' "
-                    f"temporal_anchor='{n.label_version_date or 'unknown'}'>"
-                    f"      <drug>{n.drug_name_generic}</drug>"
-                    f"      <context population='{n.patient_population or 'general'}' route='{n.dose_route or 'unspecified'}'/>"
-                    f"      <exact_quote>{n.verbatim_text}</exact_quote>"
-                    f"    </artifact>"
+                    f"    <artifact urn='{_x(n.urn)}' type='{_x(n.layout_type)}' boxed_warning='{boxed}' "
+                    f"has_dose_metadata='{has_dose_metadata}' temporal_anchor='{_x(n.label_version_date or 'unknown')}'>"
                 )
+                prompt.append(f"      <drug>{_x(n.drug_name_generic)}</drug>")
+                prompt.append(
+                    f"      <context population='{_x(n.patient_population or 'general')}' route='{_x(n.dose_route or 'unspecified')}'/>"
+                )
+                if n.dose_values:
+                    prompt.append(
+                        f"      <dose_metadata values='{_x(n.dose_values)}' units='{_x(n.dose_units)}'/>"
+                    )
+                prompt.append(f"      <exact_quote>{_x(n.verbatim_text)}</exact_quote>")
+                prompt.append("    </artifact>")
             prompt.append("  </verbatim_locked_nodes>\n")
+        else:
+            prompt.append("  <!-- NO verbatim-locked dosing nodes retrieved -->\n")
 
         if self.paraphrase_nodes:
             prompt.append("  <supporting_nodes type='paraphrasable_context'>")
             for n in self.paraphrase_nodes:
+                scope = "atc_class_level" if getattr(n, "_is_atc_neighbor", False) else "drug_specific"
                 prompt.append(
-                    f"    <artifact urn='{n.urn}' type='{n.layout_type}' temporal_anchor='{n.label_version_date or 'unknown'}'>"
-                    f"      <content>{n.verbatim_text}</content>"
+                    f"    <artifact urn='{_x(n.urn)}' type='{_x(n.layout_type)}' scope='{scope}' temporal_anchor='{_x(n.label_version_date or 'unknown')}'>"
+                    f"      <content>{_x(n.verbatim_text)}</content>"
                     f"    </artifact>"
                 )
             prompt.append("  </supporting_nodes>\n")
@@ -148,8 +167,8 @@ class CogCanvasArtifact(BaseCogCanvasArtifact):
             prompt.append("  <causal_mechanisms type='drug_interactions'>")
             for n in self.causal_context:
                 prompt.append(
-                    f"    <artifact urn='{n.urn}' drug='{n.drug_name_generic}'>"
-                    f"      <mechanism_explanation>{n.verbatim_text}</mechanism_explanation>"
+                    f"    <artifact urn='{_x(n.urn)}' drug='{_x(n.drug_name_generic)}'>"
+                    f"      <mechanism_explanation>{_x(n.verbatim_text)}</mechanism_explanation>"
                     f"    </artifact>"
                 )
             prompt.append("  </causal_mechanisms>\n")
@@ -158,8 +177,8 @@ class CogCanvasArtifact(BaseCogCanvasArtifact):
             prompt.append("  <macro_context type='atc_class_summary'>")
             for n in self.macro_context:
                 prompt.append(
-                    f"    <artifact urn='{n.urn}' class='{n.atc_code}'>"
-                    f"      <class_insight>{n.verbatim_text}</class_insight>"
+                    f"    <artifact urn='{_x(n.urn)}' class='{_x(n.atc_code)}'>"
+                    f"      <class_insight>{_x(n.verbatim_text)}</class_insight>"
                     f"    </artifact>"
                 )
             prompt.append("  </macro_context>\n")
@@ -168,8 +187,8 @@ class CogCanvasArtifact(BaseCogCanvasArtifact):
             prompt.append("  <structured_tables>")
             for n in self.table_references:
                 prompt.append(
-                    f"    <artifact urn='{n.urn}'>"
-                    f"      <table_data>{n.verbatim_text}</table_data>"
+                    f"    <artifact urn='{_x(n.urn)}'>"
+                    f"      <table_data>{_x(n.verbatim_text)}</table_data>"
                     f"    </artifact>"
                 )
             prompt.append("  </structured_tables>\n")
@@ -178,16 +197,17 @@ class CogCanvasArtifact(BaseCogCanvasArtifact):
 
         prompt += [
             "<reasoning_protocol>",
-            "Before answering, establish a chain of thought:",
-            "1. Identify the temporal_anchors of the evidence to ensure you are using the most recent label data.",
-            "2. Map the <causal_mechanisms> to the <query_intent> if this is an interaction or 'why' question.",
-            "3. Extract the exact numerical constraints from <verbatim_locked_nodes>.",
+            "Step 1: Identify the temporal anchors of the evidence and prefer the most recent label data.",
+            "Step 2: Count nodes with has_dose_metadata='true'. If none exist for a dosing request, follow rule 3.",
+            "Step 3: If scope='atc_class_level', state clearly that the evidence is class-level rather than drug-specific.",
+            "Step 4: Map the <causal_mechanisms> to the <query_intent> for interaction or 'why' questions.",
+            "Step 5: Extract exact numerical constraints from <verbatim_locked_nodes>.",
             "</reasoning_protocol>\n"
         ]
 
         prompt += [
             "<user_query>",
-            self.intent.raw_query,
+            _x(self.intent.raw_query),
             "</user_query>"
         ]
 

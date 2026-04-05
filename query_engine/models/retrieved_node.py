@@ -13,10 +13,11 @@ class RetrievedNode:
     atc_code:          str
     raglens_risk:      float
     chunk_confidence:  float
-    dose_val:          Optional[float]
-    dose_unit:         Optional[str]
+    dose_values:       list[float]
+    dose_units:        list[str]
     dose_route:        Optional[str]
     patient_population: Optional[str]
+    parent_urn:        Optional[str]
     boxed_warning:     bool
     interaction_ids:   list[str]
     table_ref:         list[str]
@@ -26,10 +27,19 @@ class RetrievedNode:
 
     verbatim_locked:     bool = False
     confidence_verified: bool = False
-    verified_dose_val:   Optional[float] = None
+    verified_dose_values: list[float] = field(default_factory=list)
+    verified_dose_units: list[str] = field(default_factory=list)
 
     @classmethod
     def from_es_hit(cls, source: dict, maxsim_score: float = 0.0) -> "RetrievedNode":
+        dose_values = source.get("dose_values")
+        if dose_values is None and source.get("dose_val") is not None:
+            dose_values = [source["dose_val"]]
+
+        dose_units = source.get("dose_units")
+        if dose_units is None and source.get("dose_unit") is not None:
+            dose_units = [source["dose_unit"]]
+
         return cls(
             urn                = source.get("urn_id", ""),
             layout_type        = source.get("layout_type", ""),
@@ -41,10 +51,11 @@ class RetrievedNode:
             atc_code           = source.get("atc_code", ""),
             raglens_risk       = float(source.get("raglens_risk", 0.0)),
             chunk_confidence   = float(source.get("chunk_confidence", 1.0)),
-            dose_val           = source.get("dose_val"),
-            dose_unit          = source.get("dose_unit"),
+            dose_values        = dose_values or [],
+            dose_units         = dose_units or [],
             dose_route         = source.get("dose_route"),
             patient_population = source.get("patient_population"),
+            parent_urn         = source.get("parent_urn"),
             boxed_warning      = bool(source.get("boxed_warning", False)),
             interaction_ids    = source.get("interaction_ids") or [],
             table_ref          = source.get("table_ref") or [],

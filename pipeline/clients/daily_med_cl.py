@@ -14,8 +14,6 @@ class DailyMedClient:
 
     Rate limit: 240 requests/min for anonymous users.
     Our delay: 0.34s between calls = ~176/min — comfortably under limit.
-
-    Financial pipeline equivalent: the EDGAR fetcher (urllib, retries, rate limit).
     """
 
     BASE = CFG.api.dailymed_base
@@ -55,8 +53,12 @@ class DailyMedClient:
         return self._get(url)
 
     def get_label_by_generic_name(self, drug_name: str) -> Optional[dict]:
-        url = (f"{self.OPENFDA}?search=openfda.generic_name:\"{drug_name}\""
-               f"&limit=1&sort=effective_time:desc")
+        raw_query = f'openfda.generic_name:"{drug_name}" AND openfda.is_original_packager:true AND openfda.application_number:(NDA* OR ANDA*)'
+        
+        encoded_query = urllib.parse.quote(raw_query)
+        
+        url = f"{self.OPENFDA}?search={encoded_query}&limit=1&sort=effective_time:desc"
+        
         time.sleep(CFG.api.request_delay)
         return self._get(url)
 

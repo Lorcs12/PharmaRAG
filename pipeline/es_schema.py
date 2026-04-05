@@ -1,9 +1,10 @@
 from elasticsearch import Elasticsearch
 from logger import get_logger
+from config import ElasticsearchConfig
 
 log = get_logger("es_schema")
 
-INDEX_NAME = "pharma_knowledge_v1"
+INDEX_NAME = ElasticsearchConfig.index
 
 INDEX_MAPPING = {
     "settings": {
@@ -65,6 +66,7 @@ INDEX_MAPPING = {
     "mappings": {
         "properties": {
             "urn_id": {"type": "keyword"},
+            "parent_urn": {"type": "keyword"},
             "set_id": {"type": "keyword"},
             "layout_type": {"type": "keyword"},
             "verbatim_text": {
@@ -106,8 +108,8 @@ INDEX_MAPPING = {
             "atc_code": {"type": "keyword"},
             "regulatory_source": {"type": "keyword"},
             "smpc_section_code": {"type": "keyword"},
-            "dose_val": {"type": "double"},
-            "dose_unit": {"type": "keyword"},
+            "dose_values": {"type": "double"},
+            "dose_units": {"type": "keyword"},
             "dose_route": {"type": "keyword"},
             "patient_population": {"type": "keyword"},
             "boxed_warning": {"type": "boolean"},

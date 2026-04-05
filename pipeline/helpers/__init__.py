@@ -1,1 +1,1 @@
-from .utils import strip_html
+from .utils import strip_html, normalize_dosing_text

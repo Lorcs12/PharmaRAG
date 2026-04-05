@@ -6,7 +6,7 @@ import os
 @dataclass
 class ElasticsearchConfig:
     host:  str = "http://localhost:9200"
-    index: str = "pharma_knowledge_v1"
+    index: str = "pharma_knowledge_v3"
 
     bulk_chunk_size: int = 400
 
@@ -123,6 +123,13 @@ class APIConfig:
 
 
 @dataclass
+class LLMConfig:
+    provider: str = "google_ai_studio"
+    model: str = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
+    api_key_env: str = "google_api_key"
+
+
+@dataclass
 class CheckpointConfig:
     dir:        str = "./checkpoints"
     save_every: int = 50  
@@ -140,6 +147,7 @@ class PharmaConfig:
     embedding:   EmbeddingConfig     = field(default_factory=EmbeddingConfig)
     ingestion:   IngestionConfig     = field(default_factory=IngestionConfig)
     api:         APIConfig           = field(default_factory=APIConfig)
+    llm:         LLMConfig           = field(default_factory=LLMConfig)
     checkpoint:  CheckpointConfig    = field(default_factory=CheckpointConfig)
     log:         LogConfig           = field(default_factory=LogConfig)
 
