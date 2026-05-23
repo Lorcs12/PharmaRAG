@@ -1,21 +1,28 @@
 from __future__ import annotations
 
 import copy
+import os
 import re
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
-
 from config import CFG
 from embedder import embed_document
 from logger import Timer, get_logger
 
 from .constants import (
-    QUERY_TYPE_CAUSAL,
-    QUERY_TYPE_COMPARATIVE,
-    QUERY_TYPE_FACTUAL,
-    QUERY_TYPE_STRATEGIC,
+    QUERY_TYPE_CAUSAL, QUERY_TYPE_COMPARATIVE, QUERY_TYPE_FACTUAL, QUERY_TYPE_STRATEGIC,
+    LABEL_RECENCY_YEARS,
+    MAX_REFLECTION_ROUNDS, MIN_ACCEPTABLE_HITS, MIN_MAXSIM_FLOOR,
+    MIN_DOSE_EVIDENCE_NODES, MIN_TARGET_DRUG_HITS, SATURATION_DELTA_PCT,
+    HIGH_CONF_FIXED_DOSE_MAXSIM, POPULATION_RELAX_THRESHOLD,
+    NUMERIC_TITRATION_POPULATIONS,
+    FALLBACK_LAYOUT_EXPANSION, ABBREV_EXPANSION,
+    FIXED_DOSE_STATEMENT_RE, ABSENCE_SEEKING_RE, EXPLICIT_DOSING_INTENT_RE,
+    MONITORING_FOCUSED_RE, EXPLICIT_REGIMEN_RE,
+    LOINC_DIVERSITY_MATRIX, BROAD_INTENT_RE,
+    SEQ_TITRATION_RE, INIT_DOSE_RE, MAX_DOSE_RE,
+    NUMERIC_DOSE_SIGNAL_RE,
 )
 from .cognitive_canvas import CogCanvasArtifact
 from .models import PharmQueryIntent
@@ -23,55 +30,10 @@ from .query_pipeline import PharmaQueryEngine
 
 log = get_logger("reflective_retrieval", CFG.log.file, CFG.log.level)
 
-MAX_REFLECTION_ROUNDS: int = 3
-MIN_ACCEPTABLE_HITS: int = 3
-MIN_MAXSIM_FLOOR: float = 0.38
-MIN_DOSE_EVIDENCE_NODES: int = 2
-LABEL_RECENCY_YEARS: int = 3
-POPULATION_RELAX_THRESHOLD: int = 1
-NUMERIC_TITRATION_POPULATIONS: set[str] = {
-    "renal_impairment",
-    "hepatic_impairment",
-    "pediatric",
-    "elderly",
-}
 
-_FALLBACK_LAYOUT_EXPANSION: dict[str, list[str]] = {
-    "dosing": ["warning", "indication", "pharmacology"],
-    "contraindication": ["warning", "interaction"],
-    "interaction": ["warning", "pharmacology"],
-    "warning": ["indication", "pharmacology"],
-    "indication": ["dosing", "warning"],
-    "pharmacology": ["indication", "warning"],
-    "structured_fact": ["dosing", "warning"],
-}
-
-_ABBREV_EXPANSION: dict[str, str] = {
-    r"\bckd\b": "chronic kidney disease renal impairment",
-    r"\bhf\b": "heart failure",
-    r"\bmi\b": "myocardial infarction",
-    r"\bafib\b": "atrial fibrillation",
-    r"\bdm\b": "diabetes mellitus",
-    r"\bhtn\b": "hypertension",
-    r"\bpeds\b": "pediatric children",
-    r"\bpo\b": "oral by mouth",
-    r"\biv\b": "intravenous",
-    r"\bsc\b": "subcutaneous",
-    r"\btid\b": "three times daily",
-    r"\bbid\b": "twice daily",
-    r"\bqd\b": "once daily",
-    r"\bprn\b": "as needed",
-    r"\bmax\b": "maximum",
-    r"\bmin\b": "minimum",
-    r"\bped\b": "pediatric",
-    r"\begfr\b": "estimated glomerular filtration rate renal function",
-    r"\bgfr\b": "glomerular filtration rate",
-    r"\bnsaid\b": "non-steroidal anti-inflammatory drug",
-    r"\bssri\b": "selective serotonin reuptake inhibitor",
-    r"\bmaoi\b": "monoamine oxidase inhibitor",
-    r"\bace\b": "angiotensin converting enzyme inhibitor",
-    r"\barb\b": "angiotensin receptor blocker",
-}
+def _f8_metadata_lockdown_enabled() -> bool:
+    raw = (os.getenv("F8_METADATA_LOCKDOWN", "1") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 class GateFailure(str, Enum):
@@ -82,6 +44,9 @@ class GateFailure(str, Enum):
     NO_INTERACTION_NODES = "F5"
     NO_DOSE_EVIDENCE = "F6"
     STALE_LABELS = "F7"
+    LOW_TARGET_DRUG_COVERAGE = "F8"
+    INCOMPLETE_DOSING_LIFECYCLE = "F9"
+    LOW_LOINC_DIVERSITY = "F10"
 
 
 @dataclass
@@ -92,7 +57,7 @@ class SufficiencyReport:
     top_maxsim: float
     layout_coverage: dict[str, int]
     dose_evidence_nodes: int
-    newest_label_year: Optional[int]
+    newest_label_year: int | None
     failures: list[GateFailure]
     intent_snapshot: dict
 
@@ -102,6 +67,230 @@ class SufficiencyReport:
 
 
 class ReflectivePharmaQueryEngine(PharmaQueryEngine):
+    @staticmethod
+    def _is_fixed_dose_statement(text: str) -> bool:
+        return bool(FIXED_DOSE_STATEMENT_RE.search(text or ""))
+
+    @staticmethod
+    def _extend_unique_hits(target_hits: list[dict], new_hits: list[dict]) -> None:
+        existing_urns = {hit.get("_source", {}).get("urn_id") for hit in target_hits}
+        for hit in new_hits:
+            urn = hit.get("_source", {}).get("urn_id")
+            if urn and urn not in existing_urns:
+                target_hits.append(hit)
+                existing_urns.add(urn)
+
+    def _should_stop_reflection(
+        self,
+        *,
+        round_number: int,
+        is_final_round: bool,
+        report: SufficiencyReport,
+        all_hits: list[dict],
+        intent: PharmQueryIntent,
+        last_best_clinical_score: float,
+        current_best_clinical_score: float,
+    ) -> bool:
+        if round_number == 1 and self._has_high_confidence_fixed_dose_evidence(all_hits, intent):
+            log.info(
+                "[ReflectiveLoop] Evidence-gated early exit: high-confidence fixed-dose evidence found in round 1",
+                extra={"round": round_number, "top_maxsim": report.top_maxsim},
+            )
+            return True
+
+        unresolved_critical = {
+            GateFailure.NO_DOSING_NODES,
+            GateFailure.NO_DOSE_EVIDENCE,
+            GateFailure.INCOMPLETE_DOSING_LIFECYCLE,
+            GateFailure.LOW_LOINC_DIVERSITY,
+            GateFailure.LOW_TARGET_DRUG_COVERAGE,
+        }
+        has_unresolved_critical = bool(report.failure_codes & unresolved_critical)
+
+        if round_number > 1 and last_best_clinical_score > 0:
+            relative_gain = (current_best_clinical_score - last_best_clinical_score) / last_best_clinical_score
+            if relative_gain <= SATURATION_DELTA_PCT and not has_unresolved_critical:
+                log.info(
+                    f"[ReflectiveLoop] Knowledge saturated on round {round_number}: "
+                    f"clinical_score_gain={relative_gain:.4f} <= {SATURATION_DELTA_PCT:.4f}",
+                    extra={
+                        "round": round_number,
+                        "relative_gain": relative_gain,
+                        "last_best_clinical_score": last_best_clinical_score,
+                        "current_best_clinical_score": current_best_clinical_score,
+                    },
+                )
+                return True
+
+        if report.passed:
+            log.info(
+                f"[ReflectiveLoop] Gate PASSED on round {round_number} with {len(all_hits)} hits",
+                extra={"round": round_number, "n_hits": len(all_hits)},
+            )
+            return True
+
+        if is_final_round:
+            log.warning(
+                f"[ReflectiveLoop] Gate FAILED on final round {round_number}; assembling with {len(all_hits)} hits. Failures: {report.failures}",
+                extra={"round": round_number, "n_hits": len(all_hits), "failures": report.failures},
+            )
+            return True
+
+        return False
+
+    def _has_high_confidence_fixed_dose_evidence(self, hits: list[dict], intent: PharmQueryIntent) -> bool:
+        if not (intent.wants_dosing and intent.query_type == QUERY_TYPE_FACTUAL and not intent.wants_interaction):
+            return False
+
+        if EXPLICIT_REGIMEN_RE.search(intent.raw_query or ""):
+            return False
+
+        best_match = 0.0
+        for hit in hits:
+            source = hit.get("_source", {})
+            text = source.get("verbatim_text", "")
+            if not self._is_fixed_dose_statement(text):
+                continue
+            best_match = max(best_match, float(hit.get("_maxsim", 0.0) or 0.0))
+        return best_match >= HIGH_CONF_FIXED_DOSE_MAXSIM
+
+    @staticmethod
+    def _best_clinical_score(hits: list[dict]) -> float:
+        return max(
+            (float(h.get("_clinical_score", h.get("_maxsim", 0.0)) or 0.0) for h in hits),
+            default=0.0,
+        )
+
+    @staticmethod
+    def _normalize_drug_text(value: str) -> str:
+        return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+    @staticmethod
+    def _contains_numeric_dose_signal(text: str) -> bool:
+        return bool(NUMERIC_DOSE_SIGNAL_RE.search(text or ""))
+
+    @staticmethod
+    def _is_absence_seeking_query(text: str) -> bool:
+        return bool(ABSENCE_SEEKING_RE.search(text or ""))
+
+    @staticmethod
+    def _is_explicit_dosing_intent_query(text: str) -> bool:
+        q = text or ""
+        if not EXPLICIT_DOSING_INTENT_RE.search(q):
+            return False
+        if MONITORING_FOCUSED_RE.search(q) and not re.search(r"\b(?:dose|dosing|dosage|titrat)\b", q, re.IGNORECASE):
+            return False
+        return True
+
+    def _hit_matches_target_drug(self, hit: dict, target_drugs: list[str]) -> bool:
+        if not target_drugs:
+            return True
+
+        source = hit.get("_source", {})
+        generic = self._normalize_drug_text(str(source.get("drug_name_generic", "")))
+        brands_raw = source.get("drug_name_brand") or []
+        if isinstance(brands_raw, str):
+            brands = [self._normalize_drug_text(brands_raw)]
+        else:
+            brands = [self._normalize_drug_text(str(b)) for b in brands_raw]
+
+        haystacks = [generic] + brands
+        for target in target_drugs:
+            t = self._normalize_drug_text(target)
+            if not t:
+                continue
+            if any(t in h or h in t for h in haystacks if h):
+                return True
+        return False
+
+    def _filter_to_target_drug_hits_if_sufficient(self, hits: list[dict], intent: PharmQueryIntent) -> list[dict]:
+        if not intent.drug_names:
+            return hits
+
+        matching = [h for h in hits if self._hit_matches_target_drug(h, intent.drug_names)]
+
+        if intent.population_filter and intent.wants_dosing and len(matching) >= 1:
+            threshold = 1
+
+        if len(matching) >= threshold:
+            return matching
+
+        penalized: list[dict] = []
+        for h in hits:
+            if not self._hit_matches_target_drug(h, intent.drug_names):
+                h = {**h}
+                h["_cross_label"] = True
+            penalized.append(h)
+        penalized.sort(
+            key=lambda x: (
+                not self._hit_matches_target_drug(x, intent.drug_names),
+                -x.get("_maxsim", 0.0),
+            )
+        )
+        return penalized
+
+    @staticmethod
+    def _evaluate_dosing_coverage(hits: list[dict]) -> tuple[bool, str, dict]:
+        protocol_requirements: dict[str, dict] = {
+            "starting_dose":        {"found": False},
+            "sequential_titration": {"found": False},
+            "maximum_dose":         {"found": False},
+        }
+
+        for hit in hits:
+            chunk_text = (hit.get("_source", {}).get("verbatim_text", "") or "")
+            if not chunk_text:
+                continue
+            if INIT_DOSE_RE.search(chunk_text):
+                protocol_requirements["starting_dose"]["found"] = True
+            if SEQ_TITRATION_RE.search(chunk_text):
+                protocol_requirements["sequential_titration"]["found"] = True
+            if MAX_DOSE_RE.search(chunk_text):
+                protocol_requirements["maximum_dose"]["found"] = True
+
+        missing_components = [k for k, v in protocol_requirements.items() if not v["found"]]
+       
+        found_count = sum(1 for v in protocol_requirements.values() if v["found"])
+        is_complete = found_count >= 1
+
+        diagnostic = (
+            f"Protocol coverage: starting_dose={protocol_requirements['starting_dose']['found']}, "
+            f"sequential_titration={protocol_requirements['sequential_titration']['found']}, "
+            f"max_dose={protocol_requirements['maximum_dose']['found']}"
+        )
+        if missing_components:
+            diagnostic += f" | Missing: {', '.join(missing_components)}"
+
+        return is_complete, diagnostic, protocol_requirements
+
+    @staticmethod
+    def _evaluate_loinc_diversity(
+        hits: list[dict],
+        intent: PharmQueryIntent,
+    ) -> tuple[bool, int, int, list[str]]:
+        
+        complexity = "broad" if BROAD_INTENT_RE.search(intent.raw_query or "") else "narrow"
+        required = LOINC_DIVERSITY_MATRIX.get((intent.query_type, complexity), 1)
+
+        loinc_codes: set[str] = set()
+        for hit in hits:
+            src = hit.get("_source", {})
+            code = (
+                src.get("smpc_section_code")
+                or src.get("section_code")
+                or src.get("loinc_code")
+                or ""
+            )
+            if code:
+                loinc_codes.add(code)
+
+            elif src.get("layout_type") == "structured_fact":
+                loinc_codes.add("structured_fact")
+
+        distinct = len(loinc_codes)
+        is_sufficient = distinct >= required
+        return is_sufficient, distinct, required, sorted(loinc_codes)
+
     def _sufficiency_gate(
         self,
         hits: list[dict],
@@ -110,7 +299,7 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
     ) -> SufficiencyReport:
         failures: list[GateFailure] = []
         layout_coverage: dict[str, int] = {}
-        newest_label_year: Optional[int] = None
+        newest_label_year: int | None = None
 
         for hit in hits:
             source = hit.get("_source", {})
@@ -133,6 +322,16 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
             if hit.get("_source", {}).get("dose_values")
             or hit.get("_source", {}).get("dose_val") is not None
         )
+        numeric_dose_signal_nodes = sum(
+            1
+            for hit in hits
+            if self._contains_numeric_dose_signal(hit.get("_source", {}).get("verbatim_text", ""))
+        )
+        target_drug_hits = sum(
+            1
+            for hit in hits
+            if self._hit_matches_target_drug(hit, intent.drug_names)
+        )
 
         if len(hits) < MIN_ACCEPTABLE_HITS:
             failures.append(GateFailure.TOO_FEW_HITS)
@@ -140,23 +339,65 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
         if hits and top_maxsim < MIN_MAXSIM_FLOOR:
             failures.append(GateFailure.LOW_MAXSIM)
 
-        if (
+        dosing_required = (
             intent.wants_dosing
+            and intent.query_type == QUERY_TYPE_FACTUAL
+            and not intent.wants_interaction
+        )
+        explicit_dosing_intent = dosing_required and self._is_explicit_dosing_intent_query(intent.raw_query)
+
+        if (
+            explicit_dosing_intent
             and layout_coverage.get("dosing", 0) == 0
             and layout_coverage.get("structured_fact", 0) == 0
         ):
             failures.append(GateFailure.NO_DOSING_NODES)
 
         requires_numeric_titration = (
-            intent.wants_dosing
+            explicit_dosing_intent
             and intent.population_filter in NUMERIC_TITRATION_POPULATIONS
         )
 
-        if requires_numeric_titration and dose_evidence_nodes < MIN_DOSE_EVIDENCE_NODES:
+        if requires_numeric_titration and max(dose_evidence_nodes, numeric_dose_signal_nodes) < MIN_DOSE_EVIDENCE_NODES:
             failures.append(GateFailure.NO_DOSE_EVIDENCE)
+
+        if intent.query_type == QUERY_TYPE_FACTUAL and intent.drug_names:
+            required_target_hits = min(max(1, len(intent.drug_names)), MIN_TARGET_DRUG_HITS)
+            if target_drug_hits < required_target_hits:
+                failures.append(GateFailure.LOW_TARGET_DRUG_COVERAGE)
 
         if intent.population_filter and len(hits) <= POPULATION_RELAX_THRESHOLD:
             failures.append(GateFailure.POPULATION_TOO_NARROW)
+
+        _regimen_signals = ("regimen", "schedule", "titrat", "week-by-week", "day 1", "starting dose", "initial dose", "maximum dose")
+        is_regimen_query = (
+            dosing_required
+            and any(sig in intent.raw_query.lower() for sig in _regimen_signals)
+        )
+        if is_regimen_query:
+            protocol_complete, protocol_diagnostic, protocol_coverage = self._evaluate_dosing_coverage(hits)
+            if not protocol_complete:
+                log.info(
+                    f"[Dosing Lifecycle Audit] {protocol_diagnostic}",
+                    extra={"coverage": protocol_coverage, "round": round_number}
+                )
+                failures.append(GateFailure.INCOMPLETE_DOSING_LIFECYCLE)
+
+        loinc_ok, loinc_distinct, loinc_required, loinc_codes = self._evaluate_loinc_diversity(
+            hits, intent
+        )
+        if not loinc_ok:
+            log.info(
+                f"[LOINC Diversity] Fragment Capture detected: {loinc_distinct} distinct "
+                f"section codes < required {loinc_required}. Codes: {loinc_codes}",
+                extra={
+                    "distinct": loinc_distinct,
+                    "required": loinc_required,
+                    "codes": loinc_codes,
+                    "round": round_number,
+                },
+            )
+            failures.append(GateFailure.LOW_LOINC_DIVERSITY)
 
         if (
             intent.wants_interaction
@@ -191,7 +432,8 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
         log.info(
             f"[SufficiencyGate] round={round_number} passed={report.passed} "
             f"hits={len(hits)} top_maxsim={top_maxsim:.3f} "
-            f"dose_evidence={dose_evidence_nodes} newest_year={newest_label_year} "
+            f"dose_evidence={dose_evidence_nodes} numeric_dose_signals={numeric_dose_signal_nodes} "
+            f"target_drug_hits={target_drug_hits} newest_year={newest_label_year} "
             f"failures={[failure.value for failure in failures]}",
             extra={
                 "round": round_number,
@@ -199,6 +441,8 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
                 "n_hits": len(hits),
                 "top_maxsim": top_maxsim,
                 "dose_evidence_nodes": dose_evidence_nodes,
+                "numeric_dose_signal_nodes": numeric_dose_signal_nodes,
+                "target_drug_hits": target_drug_hits,
                 "newest_label_year": newest_label_year,
                 "failures": [failure.value for failure in failures],
             },
@@ -217,6 +461,7 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
         extra_hits: list[dict] = []
         query_text_changed = False
         failure_codes = report.failure_codes
+        absence_seeking = self._is_absence_seeking_query(new_intent.raw_query)
 
         if GateFailure.POPULATION_TOO_NARROW in failure_codes and new_intent.population_filter:
             old_population = new_intent.population_filter
@@ -227,18 +472,34 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
             )
 
         if GateFailure.NO_DOSING_NODES in failure_codes and "dosing" not in new_intent.layout_filters:
-            new_intent.layout_filters.insert(0, "dosing")
-            new_intent.preferred_layout = "dosing"
-            new_intent.wants_dosing = True
-            log.info(
-                f"[Rewrite R{round_number}] Injected 'dosing' pool",
-                extra={"rewrite": "inject_dosing_pool", "round": round_number},
-            )
+            if absence_seeking:
+                added = []
+                for pool in ("warning", "indication"):
+                    if pool not in new_intent.layout_filters:
+                        new_intent.layout_filters.append(pool)
+                        added.append(pool)
+                guidance = " If dosing is not specified by the label, answer INSUFFICIENT_EVIDENCE."
+                if guidance.lower() not in new_intent.raw_query.lower():
+                    new_intent.raw_query = f"{new_intent.raw_query}{guidance}".strip()
+                    query_text_changed = True
+                log.info(
+                    f"[Rewrite R{round_number}] F3 absence-safe pivot: avoided dosing expansion; added pools={added}",
+                    extra={"rewrite": "f3_absence_safe_pivot", "round": round_number, "added": added},
+                )
+            else:
+                new_intent.layout_filters.insert(0, "dosing")
+                new_intent.preferred_layout = "dosing"
+                new_intent.wants_dosing = True
+                log.info(
+                    f"[Rewrite R{round_number}] Injected 'dosing' pool",
+                    extra={"rewrite": "inject_dosing_pool", "round": round_number},
+                )
 
-        if (
-            GateFailure.NO_DOSE_EVIDENCE in failure_codes
-            or GateFailure.NO_DOSING_NODES in failure_codes
-        ):
+        should_parent_pivot = GateFailure.NO_DOSE_EVIDENCE in failure_codes
+        if GateFailure.NO_DOSING_NODES in failure_codes and not absence_seeking:
+            should_parent_pivot = True
+
+        if should_parent_pivot:
             parent_hits = self._fetch_parent_nodes(hits, max_parents=5)
             extra_hits.extend(parent_hits)
             log.info(
@@ -269,12 +530,17 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
 
         if GateFailure.NO_INTERACTION_NODES in failure_codes:
             added_pools = []
-            for pool in ("interaction", "pharmacology"):
+            for pool in ("interaction", "pharmacology", "warning"):
                 if pool not in new_intent.layout_filters:
                     new_intent.layout_filters.append(pool)
                     added_pools.append(pool)
             new_intent.wants_interaction = True
             new_intent.wants_mechanism = True
+            if new_intent.drug_names and len(new_intent.drug_names) >= 2:
+                drug_pair = " ".join(new_intent.drug_names[:2])
+                if drug_pair.lower() not in new_intent.raw_query.lower():
+                    new_intent.raw_query = f"{new_intent.raw_query} {drug_pair}".strip()
+                    query_text_changed = True
             if added_pools:
                 log.info(
                     f"[Rewrite R{round_number}] Injected fallback causal pools: {added_pools}",
@@ -283,21 +549,23 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
 
         if GateFailure.TOO_FEW_HITS in failure_codes or GateFailure.LOW_MAXSIM in failure_codes:
             expanded_query = new_intent.raw_query
-            for pattern, replacement in _ABBREV_EXPANSION.items():
+            expanded_query_changed = False
+            for pattern, replacement in ABBREV_EXPANSION.items():
                 rewritten_query = re.sub(pattern, replacement, expanded_query, flags=re.IGNORECASE)
                 if rewritten_query != expanded_query:
                     expanded_query = rewritten_query
-                    query_text_changed = True
+                    expanded_query_changed = True
 
-            if query_text_changed:
+            if expanded_query_changed:
                 new_intent.raw_query = expanded_query
+                query_text_changed = True
                 log.info(
                     f"[Rewrite R{round_number}] Expanded abbreviations in query text",
                     extra={"rewrite": "abbrev_expansion", "new_query": expanded_query[:120], "round": round_number},
                 )
 
             primary_pool = new_intent.preferred_layout
-            fallback_pools = _FALLBACK_LAYOUT_EXPANSION.get(primary_pool, ["warning"])
+            fallback_pools = FALLBACK_LAYOUT_EXPANSION.get(primary_pool, ["warning"])
             added_pools = []
             for pool in fallback_pools:
                 if pool not in new_intent.layout_filters:
@@ -316,6 +584,102 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
                 extra={"rewrite": "relax_date_filter", "round": round_number},
             )
 
+        if GateFailure.LOW_TARGET_DRUG_COVERAGE in failure_codes and new_intent.drug_names:
+            if new_intent.query_type in {QUERY_TYPE_STRATEGIC, QUERY_TYPE_COMPARATIVE}:
+                log.info(
+                    f"[Rewrite R{round_number}] Skipped F8 target-drug reinforcement for {new_intent.query_type} query",
+                    extra={"rewrite": "skip_reinforce_target_drugs", "round": round_number},
+                )
+            else:
+                if _f8_metadata_lockdown_enabled():
+                    new_intent.drug_lockdown_exact = True
+                    
+                    query_text_changed = True
+                    log.info(
+                        f"[Rewrite R{round_number}] F8 metadata lockdown enabled: exact generic/brand match",
+                        extra={"rewrite": "f8_metadata_lockdown_exact", "round": round_number},
+                    )
+                else:
+                    log.info(
+                        f"[Rewrite R{round_number}] F8 metadata lockdown disabled via env flag",
+                        extra={"rewrite": "f8_metadata_lockdown_disabled", "round": round_number},
+                    )
+
+        if GateFailure.INCOMPLETE_DOSING_LIFECYCLE in failure_codes:
+            drug_phrase = " ".join(new_intent.drug_names) if new_intent.drug_names else "this drug"
+            titration_query = (
+                f"Provide the complete step-by-step titration schedule for {drug_phrase}. "
+                f"Include the starting dose, week-by-week dose increases, "
+                f"and the maximum recommended dosage."
+            )
+            new_intent.raw_query = titration_query
+            query_text_changed = True
+            parent_hits = self._fetch_parent_nodes(hits, max_parents=5)
+            extra_hits.extend(parent_hits)
+            log.info(
+                f"[Rewrite R{round_number}] F9 clinical instruction pivot: rewrote query + "
+                f"parent_pivot ({len(parent_hits)} parents added)",
+                extra={
+                    "rewrite": "titration_clinical_instruction_pivot",
+                    "new_query": titration_query,
+                    "parent_hits_added": len(parent_hits),
+                    "round": round_number,
+                },
+            )
+
+        if GateFailure.LOW_LOINC_DIVERSITY in failure_codes:
+            broad_pools = ["dosing", "indication", "warning", "interaction"]
+            added_pools = []
+            for pool in broad_pools:
+                if pool not in new_intent.layout_filters:
+                    new_intent.layout_filters.append(pool)
+                    added_pools.append(pool)
+
+            if GateFailure.INCOMPLETE_DOSING_LIFECYCLE not in failure_codes:
+                drug_phrase = " ".join(new_intent.drug_names) if new_intent.drug_names else "drug"
+
+                preserved_context = []
+                orig_lower = new_intent.raw_query.lower()
+
+                ddi_patterns = [
+                    r"(taking|on|with|plus|combined with)\s+([a-z]+(?:proate|arin|pine|zole|mycin|cillin|prazole|statin|dipine))",
+                    r"(concurrently|concomitant(?:ly)?)\s+(?:with\s+)?([a-z]+)",
+                ]
+                for pattern in ddi_patterns:
+                    match = re.search(pattern, orig_lower)
+                    if match:
+                        preserved_context.append(match.group(0))
+                        break
+
+                time_match = re.search(r"\b(\d+-?(?:week|day|hour|month)s?)\b", orig_lower)
+                if time_match:
+                    preserved_context.append(time_match.group(1))
+
+                if re.search(r"\beach\s+(?:interval|week|day|dose|time\s+point)", orig_lower):
+                    preserved_context.append("each interval")
+                elif "complete schedule" in orig_lower:
+                    preserved_context.append("complete schedule")
+
+                context_str = " ".join(preserved_context) if preserved_context else ""
+                new_intent.raw_query = (
+                    f"complete dosing and administration information "
+                    f"recommended dose special populations adjustments {drug_phrase} {context_str}"
+                ).strip()
+                query_text_changed = True
+
+            parent_hits = self._fetch_parent_nodes(hits, max_parents=8)
+            extra_hits.extend(parent_hits)
+            log.info(
+                f"[Rewrite R{round_number}] F10 LOINC diversity pivot: pools={added_pools} "
+                f"parent_hits={len(parent_hits)} query_rewritten={not bool(GateFailure.INCOMPLETE_DOSING_LIFECYCLE in failure_codes)}",
+                extra={
+                    "rewrite": "loinc_diversity_pivot",
+                    "added_pools": added_pools,
+                    "parent_hits_added": len(parent_hits),
+                    "round": round_number,
+                },
+            )
+
         return new_intent, extra_hits, query_text_changed
 
     def execute_query_pipeline(self, query: str) -> CogCanvasArtifact:
@@ -330,6 +694,8 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
 
             all_hits: list[dict] = []
             sufficiency_reports: list[SufficiencyReport] = []
+            _hits_before_rewrite: int = 0
+            last_best_clinical_score: float = 0.0
 
             for round_number in range(1, MAX_REFLECTION_ROUNDS + 1):
                 is_final_round = round_number == MAX_REFLECTION_ROUNDS
@@ -339,36 +705,32 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
                 )
 
                 with Timer(log, f"retrieve_round_{round_number}"):
-                    round_hits = self._execute_hybrid_retrieval(
+                    round_hits = self._execute_parallel_retrieval(
                         intent,
                         q_vectors,
                         hard_date_filter=(round_number == 1 and explicit_year_filter),
                     )
-
-                existing_urns = {hit.get("_source", {}).get("urn_id") for hit in all_hits}
-                for hit in round_hits:
-                    urn = hit.get("_source", {}).get("urn_id")
-                    if urn and urn not in existing_urns:
-                        all_hits.append(hit)
-                        existing_urns.add(urn)
+                    round_hits = self._filter_to_target_drug_hits_if_sufficient(round_hits, intent)
+                self._extend_unique_hits(all_hits, round_hits)
+                current_best_clinical_score = self._best_clinical_score(all_hits)
 
                 report = self._sufficiency_gate(all_hits, intent, round_number)
                 sufficiency_reports.append(report)
 
-                if report.passed:
-                    log.info(
-                        f"[ReflectiveLoop] Gate PASSED on round {round_number} with {len(all_hits)} hits",
-                        extra={"round": round_number, "n_hits": len(all_hits)},
-                    )
+                if self._should_stop_reflection(
+                    round_number=round_number,
+                    is_final_round=is_final_round,
+                    report=report,
+                    all_hits=all_hits,
+                    intent=intent,
+                    last_best_clinical_score=last_best_clinical_score,
+                    current_best_clinical_score=current_best_clinical_score,
+                ):
                     break
 
-                if is_final_round:
-                    log.warning(
-                        f"[ReflectiveLoop] Gate FAILED on final round {round_number}; assembling with {len(all_hits)} hits. Failures: {report.failures}",
-                        extra={"round": round_number, "n_hits": len(all_hits), "failures": report.failures},
-                    )
-                    break
+                last_best_clinical_score = current_best_clinical_score
 
+                _hits_before_rewrite = len(all_hits)
                 intent, extra_hits, text_changed = self._rewrite_intent(
                     intent,
                     report,
@@ -376,11 +738,17 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
                     q_vectors,
                     round_number,
                 )
-                for hit in extra_hits:
-                    urn = hit.get("_source", {}).get("urn_id")
-                    if urn and urn not in existing_urns:
-                        all_hits.append(hit)
-                        existing_urns.add(urn)
+                self._extend_unique_hits(all_hits, extra_hits)
+
+                if not text_changed and len(all_hits) == _hits_before_rewrite:
+                    log.warning(
+                        f"[ReflectiveLoop] Frozen hits on round {round_number} "
+                        f"(no rewrite, no new hits); proceeding with {len(all_hits)} hits. "
+                        f"Failures: {report.failures}",
+                        extra={"round": round_number, "n_hits": len(all_hits), "failures": report.failures},
+                    )
+                    break
+
                 if text_changed:
                     log.info(
                         "[ReflectiveLoop] Query text changed; re-embedding",
@@ -406,6 +774,7 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
                 )
 
             with Timer(log, "assembly"):
+                all_hits = self._filter_to_target_drug_hits_if_sufficient(all_hits, intent)
                 artifact = self._assemble_cognitive_artifact(intent, all_hits, start)
 
             artifact.__dict__["_reflection_rounds"] = len(sufficiency_reports)
@@ -427,17 +796,7 @@ class ReflectivePharmaQueryEngine(PharmaQueryEngine):
 
 
 __all__ = [
-    "MAX_REFLECTION_ROUNDS",
-    "MIN_ACCEPTABLE_HITS",
-    "MIN_MAXSIM_FLOOR",
-    "MIN_DOSE_EVIDENCE_NODES",
-    "LABEL_RECENCY_YEARS",
-    "POPULATION_RELAX_THRESHOLD",
     "GateFailure",
     "ReflectivePharmaQueryEngine",
     "SufficiencyReport",
-    "QUERY_TYPE_FACTUAL",
-    "QUERY_TYPE_CAUSAL",
-    "QUERY_TYPE_COMPARATIVE",
-    "QUERY_TYPE_STRATEGIC",
 ]

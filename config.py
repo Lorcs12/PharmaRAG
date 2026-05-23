@@ -1,12 +1,15 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 @dataclass
 class ElasticsearchConfig:
     host:  str = "http://localhost:9200"
-    index: str = "pharma_knowledge_v3"
+    index: str = "pharma_knowledge_benchmark"
 
     bulk_chunk_size: int = 400
 
@@ -30,7 +33,7 @@ class EmbeddingConfig:
 class IngestionConfig:
     drug_limit: Optional[int] = 200
 
-    min_text_len: int = 80
+    min_text_len: int = 25
     smpc_section_map: Dict[str, str] = field(default_factory=lambda: {
         "34068-7": "dosing",          # DOSAGE AND ADMINISTRATION
         "34069-5": "dosing",          # HOW SUPPLIED
@@ -124,9 +127,17 @@ class APIConfig:
 
 @dataclass
 class LLMConfig:
-    provider: str = "google_ai_studio"
-    model: str = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
-    api_key_env: str = "google_api_key"
+    provider: str = "azure_openai"
+    model: str = os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini")
+    api_key_env: str = "azure_openai_api_key"
+
+
+@dataclass
+class AzureOpenAIConfig:
+    model: str = os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini")
+    endpoint_env: str = "azure_openai_endpoint"
+    api_key_env: str = "azure_openai_api_key"
+    api_version: str = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
 
 
 @dataclass
@@ -148,6 +159,7 @@ class PharmaConfig:
     ingestion:   IngestionConfig     = field(default_factory=IngestionConfig)
     api:         APIConfig           = field(default_factory=APIConfig)
     llm:         LLMConfig           = field(default_factory=LLMConfig)
+    llm_azure:   AzureOpenAIConfig   = field(default_factory=AzureOpenAIConfig)
     checkpoint:  CheckpointConfig    = field(default_factory=CheckpointConfig)
     log:         LogConfig           = field(default_factory=LogConfig)
 

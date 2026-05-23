@@ -61,6 +61,38 @@ class PharmaIngestionPipeline:
         )
         return drug_label, label_resp
 
+    def _resolve_clinical_entity_by_set_id(self, set_id: str) -> Optional[tuple[DrugLabel, dict]]:
+        log.info(f"Resolving Entity by set_id: {set_id}")
+        label_resp = self.dm.get_label_by_set_id(set_id)
+        if not label_resp or not label_resp.get("results"):
+            return None
+
+        result = label_resp["results"][0]
+        openfda = result.get("openfda", {})
+
+        generic_name = (openfda.get("generic_name", ["unknown"])[0]).lower()
+        rxcui = (openfda.get("rxcui", [""]) or [""])[0]
+        if not rxcui:
+            rxcui = self.rxnorm.get_rxcui(generic_name) or "unknown"
+
+        atc_code = self.rxnorm.get_atc_code(rxcui) if rxcui != "unknown" else None
+        atc_code = atc_code or "ZZZZ"
+
+        eff_time = result.get("effective_time", "")
+        label_date = f"{eff_time[:4]}-{eff_time[4:6]}-{eff_time[6:8]}" if len(eff_time) == 8 else None
+
+        drug_label = DrugLabel(
+            set_id=result.get("set_id", set_id),
+            rxcui=rxcui,
+            drug_generic=generic_name,
+            drug_brand=[b.title() for b in openfda.get("brand_name", [])],
+            atc_code=atc_code,
+            label_date=label_date,
+            published=label_date,
+            boxed_warning=bool(result.get("boxed_warning")),
+        )
+        return drug_label, label_resp
+
     def _generate_tripartite_embeddings(self, artifacts: list[RawChunk]) -> list[IndexDoc]:
         if not artifacts:
             return []
@@ -125,6 +157,28 @@ class PharmaIngestionPipeline:
         self.ckpt.mark_set_id_done(drug.set_id, drug.drug_generic, success)
         return success, drug
 
+    def _execute_set_id_ingestion_protocol(self, set_id: str) -> tuple[int, Optional[DrugLabel]]:
+        resolution = self._resolve_clinical_entity_by_set_id(set_id)
+        if not resolution:
+            return 0, None
+
+        drug, label_data = resolution
+
+        if self.ckpt.is_set_id_done(drug.set_id):
+            return 0, drug
+
+        all_artifacts = extract_hierarchical_dosing_artifacts(label_data, drug, log)
+        if not all_artifacts:
+            return 0, drug
+
+        docs = self._generate_tripartite_embeddings(all_artifacts)
+
+        actions = [{"_index": INDEX_NAME, "_id": d.source["urn_id"], "_source": d.source} for d in docs]
+        success, _ = helpers.bulk(self.es, actions, raise_on_error=False)
+
+        self.ckpt.mark_set_id_done(drug.set_id, drug.drug_generic, success)
+        return success, drug
+
     def execute_batch_ingestion(self, drug_names: list[str]) -> dict:
         total_indexed = 0
         failed_drugs = []
@@ -140,3 +194,19 @@ class PharmaIngestionPipeline:
 
         log.info(f"Protocol Complete: {total_indexed} artifacts indexed.")
         return {"total": total_indexed, "failed": failed_drugs}
+
+    def execute_set_id_batch_ingestion(self, set_ids: list[str]) -> dict:
+        total_indexed = 0
+        failed_set_ids = []
+        log.info(f"Initiating PharmaRAG set_id Ingestion Protocol | Target: {len(set_ids)} labels")
+
+        for set_id in tqdm(set_ids, desc="Ingesting Clinical Artifacts by set_id"):
+            try:
+                n_docs, _ = self._execute_set_id_ingestion_protocol(set_id)
+                total_indexed += n_docs
+            except Exception as e:
+                log.error(f"Ingestion Failure for set_id {set_id}: {e}")
+                failed_set_ids.append(set_id)
+
+        log.info(f"set_id Protocol Complete: {total_indexed} artifacts indexed.")
+        return {"total": total_indexed, "failed": failed_set_ids}

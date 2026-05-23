@@ -1,14 +1,14 @@
 import os
 from typing import Any
 
-from config import CFG
-from logger import get_logger, Timer
-from google import genai
-
-
 from dotenv import load_dotenv
 
 load_dotenv()
+
+from config import CFG
+from logger import get_logger, Timer
+from .utils import normalize_llm_output
+from google import genai
 
 log = get_logger("google_ai_studio", CFG.log.file, CFG.log.level)
 
@@ -37,7 +37,7 @@ class GoogleAIStudioConnector:
         text = self._extract_text(response)
         if not text:
             raise RuntimeError("Google AI Studio returned an empty response.")
-        return text
+        return normalize_llm_output(text)
 
     @staticmethod
     def _extract_text(response: Any) -> str:

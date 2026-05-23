@@ -9,13 +9,6 @@ from ..helpers.utils import strip_html
 log = get_logger("dailymed", CFG.log.file, CFG.log.level)
 
 class DailyMedClient:
-    """
-    Wraps FDA DailyMed REST API v2.
-
-    Rate limit: 240 requests/min for anonymous users.
-    Our delay: 0.34s between calls = ~176/min — comfortably under limit.
-    """
-
     BASE = CFG.api.dailymed_base
     OPENFDA = CFG.api.openfda_base
 
@@ -59,6 +52,12 @@ class DailyMedClient:
         
         url = f"{self.OPENFDA}?search={encoded_query}&limit=1&sort=effective_time:desc"
         
+        time.sleep(CFG.api.request_delay)
+        return self._get(url)
+
+    def get_label_by_set_id(self, set_id: str) -> Optional[dict]:
+        query = f'set_id:"{set_id}"'
+        url = f"{self.OPENFDA}?search={urllib.parse.quote(query)}&limit=1"
         time.sleep(CFG.api.request_delay)
         return self._get(url)
 

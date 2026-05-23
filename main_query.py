@@ -1,12 +1,32 @@
-import sys
-from query_engine import ReflectivePharmaQueryEngine, generate_google_ai_studio_answer
+import argparse
+
+from query_engine import ReflectivePharmaQueryEngine, generate_llm_answer
 
 TEST_QUERIES = [
-    "What is the standard dose of apixaban for DVT treatment in adults",
+    "What is the standard dose of apixaban?",
 ]
 
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run a single query through ReflectivePharmaQueryEngine.")
+    parser.add_argument(
+        "query",
+        nargs="?",
+        default=TEST_QUERIES[0],
+        help="Clinical question to run.",
+    )
+    parser.add_argument(
+        "--provider",
+        type=str,
+        choices=["google_ai_studio", "azure_openai"],
+        default="google_ai_studio",
+        help="LLM provider to use for final answer generation.",
+    )
+    return parser
+
+
 if __name__ == "__main__":
-    query = sys.argv[1] if len(sys.argv) > 1 else TEST_QUERIES[0]
+    args = _build_parser().parse_args()
+    query = args.query
 
     print(f"\n{'═'*72}")
     print(f"  PharmaRAG · Advanced Clinical Query Engine")
@@ -47,7 +67,7 @@ if __name__ == "__main__":
     print("LLM ANSWER")
     print(f"{'═'*72}")
     try:
-        answer = generate_google_ai_studio_answer(prompt)
+        answer = generate_llm_answer(prompt, provider=args.provider)
         print(answer)
     except Exception as exc:
         print(f"  ERROR: {exc}")

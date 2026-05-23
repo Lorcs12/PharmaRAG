@@ -35,7 +35,11 @@ def extract_hierarchical_dosing_artifacts(label_data: dict, drug: DrugLabel, log
     for field_name, (loinc_code, layout_type) in FDA_FIELD_MAP.items():
         table_field = f"{field_name}_table"
 
-        raw_sections = result.get(table_field) or result.get(field_name)
+        raw_sections = []
+        if result.get(field_name):
+            raw_sections.extend(result[field_name] if isinstance(result[field_name], list) else [result[field_name]])
+        if result.get(table_field):
+            raw_sections.extend(result[table_field] if isinstance(result[table_field], list) else [result[table_field]])
 
         if not raw_sections:
             continue

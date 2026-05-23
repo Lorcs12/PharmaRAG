@@ -23,7 +23,8 @@ class ClinicalTextAnalyzer:
         rules = []
         
         pop_keywords = {
-            "POP_PEDIATRIC": ["pediatric", "children", "child", "infant", "neonatal", "age <"],
+            "POP_NEONATAL": ["neonatal", "neonate", "newborn", "4-week-old", "4 week old"],
+            "POP_PEDIATRIC": ["pediatric", "children", "child", "infant", "age <"],
             "POP_ELDERLY": ["elderly", "geriatric", "older adult", "age ≥65", "age >=65"],
             "POP_RENAL": ["renal impairment", "renal failure", "kidney", "ckd", "creatinine clearance"],
             "POP_HEPATIC": ["hepatic impairment", "liver", "hepatic failure", "child-pugh"],

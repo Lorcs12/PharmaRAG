@@ -1,12 +1,13 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Optional
 
 @dataclass
 class RetrievedNode:
     urn:               str
     layout_type:       str
     verbatim_text:     str
-    label_version_date: Optional[str]
+    label_version_date: str | None
     drug_name_generic: str
     drug_name_brand:   list
     rxcui:             str
@@ -15,13 +16,13 @@ class RetrievedNode:
     chunk_confidence:  float
     dose_values:       list[float]
     dose_units:        list[str]
-    dose_route:        Optional[str]
-    patient_population: Optional[str]
-    parent_urn:        Optional[str]
+    dose_route:        str | None
+    patient_population: str | None
+    parent_urn:        str | None
     boxed_warning:     bool
     interaction_ids:   list[str]
     table_ref:         list[str]
-    raptor_cluster:    Optional[str]
+    raptor_cluster:    str | None
     smpc_section_code: str
     maxsim_score:      float = 0.0
 

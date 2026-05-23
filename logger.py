@@ -13,7 +13,7 @@ class JSONLineHandler(logging.Handler):
     def __init__(self, filepath: str):
         super().__init__()
         Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-        self._file = open(filepath, "a", buffering=1)
+        self._file = open(filepath, "a", encoding="utf-8", buffering=1)
 
     def emit(self, record: logging.LogRecord):
         entry = {
@@ -26,7 +26,7 @@ class JSONLineHandler(logging.Handler):
             if k not in logging.LogRecord.__dict__ and not k.startswith("_"):
                 entry[k] = v
         try:
-            self._file.write(json.dumps(entry) + "\n")
+            self._file.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
             pass
 
@@ -38,6 +38,12 @@ def get_logger(name: str, log_file: str = "./logs/pharma_pipeline.jsonl",
         return logger
 
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
 
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(logging.Formatter(
